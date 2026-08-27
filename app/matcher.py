@@ -10,17 +10,18 @@ from app.models import CargoFilter
 from app.parser import ParsedCargo
 
 
-def _location_matches(filter_value: str, parsed_value: str | None) -> bool:
+def _location_matches(filter_value: str | None, parsed_value: str | None) -> bool:
+    if not filter_value:
+        return True
+    fv = geodata.normalize(filter_value)
+    if not fv or fv in ("istalgan", "barchasi", "har qanday", "hamma", "all", "*", "-", "shart emas"):
+        return True
+
     if not parsed_value:
         return False
-    fv = geodata.normalize(filter_value)
     pv = geodata.normalize(parsed_value)
-    if not fv or not pv:
+    if not pv:
         return False
-
-    # Har qanday / istalgan bo'lsa
-    if fv in ("istalgan", "barchasi", "har qanday", "hamma", "all", "*"):
-        return True
 
     # Aniq nom mosligi
     if fv == pv or fv in pv or pv in fv:
@@ -48,7 +49,7 @@ def _vehicle_matches(filter_value: str | None, parsed_types: list[str]) -> bool:
     if not filter_value:
         return True
     fv = geodata.normalize(filter_value)
-    if fv in ("istalgan", "barchasi", "har qanday", "hamma", "shart emas", "-"):
+    if not fv or fv in ("istalgan", "barchasi", "har qanday", "hamma", "shart emas", "-", "all"):
         return True
     if not parsed_types:
         return True  # Xabarda mashina turi yozilmagan bo'lsa, yukni o'tkazib yubormaymiz
@@ -67,10 +68,7 @@ def _tonnage_bounds(value: str | None) -> tuple[float, float] | None:
 
 
 def _tonnage_matches(filter_value: str | None, parsed_value: str | None) -> bool:
-    # Tonnaj tanlanmagan yoki xabarda ko'rsatilmagan bo'lsa, foydali e'lonni
-    # o'tkazib yubormaymiz. Xabar tonnaji bor holatda esa tanlangan oraliq bilan
-    # kesishishi shart.
-    if not filter_value or geodata.normalize(filter_value) in ("istalgan", "barchasi", "har qanday"):
+    if not filter_value or geodata.normalize(filter_value) in ("istalgan", "barchasi", "har qanday", "shart emas", "-", "all"):
         return True
     filter_bounds = _tonnage_bounds(filter_value)
     parsed_bounds = _tonnage_bounds(parsed_value)
@@ -81,12 +79,13 @@ def _tonnage_matches(filter_value: str | None, parsed_value: str | None) -> bool
 
 def matches(cargo_filter: CargoFilter, parsed: ParsedCargo) -> bool:
     """True qaytaradi, agar parsed xabar shu filtrga mos kelsa."""
-    if not parsed.origin or not parsed.destination:
+    # Kamida bitta yo'nalish yoki yuk signali bo'lishi kerak
+    if not parsed.is_cargo:
         return False
 
-    if not _location_matches(cargo_filter.origin, parsed.origin):
+    if cargo_filter.origin and not _location_matches(cargo_filter.origin, parsed.origin):
         return False
-    if not _location_matches(cargo_filter.destination, parsed.destination):
+    if cargo_filter.destination and not _location_matches(cargo_filter.destination, parsed.destination):
         return False
     if not _vehicle_matches(cargo_filter.vehicle_type, parsed.vehicle_types):
         return False
