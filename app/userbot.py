@@ -12,8 +12,10 @@ Vazifalari:
 import asyncio
 import datetime
 import json
+import re
 import time
 import urllib.request
+import urllib.error
 from collections import deque
 
 from telethon import TelegramClient, events, errors
@@ -45,7 +47,7 @@ _LAST_FILTERS_REFRESH: float = 0.0
 
 
 def _send_direct_bot_dm(user_telegram_id: int, text: str) -> bool:
-    """Telegram Bot API orqali foydalanuvchiga to'g'ridan-to'g'ri DM xabarnoma yuborish."""
+    """Telegram Bot API orqali foydalanuvchiga to'g'ridan-to'g'ri DM xabarnoma yuborish (HTML va Plain-Text fallback bilan)."""
     url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage"
     payload = json.dumps({
         "chat_id": user_telegram_id,
@@ -58,8 +60,24 @@ def _send_direct_bot_dm(user_telegram_id: int, text: str) -> bool:
         with urllib.request.urlopen(req, timeout=8) as resp:
             data = json.loads(resp.read().decode())
             return bool(data.get("ok"))
+    except urllib.error.HTTPError as he:
+        try:
+            clean_text = re.sub(r"<[^>]+>", "", text)
+            payload_plain = json.dumps({
+                "chat_id": user_telegram_id,
+                "text": clean_text,
+                "disable_web_page_preview": True,
+            }).encode("utf-8")
+            req_plain = urllib.request.Request(url, data=payload_plain, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req_plain, timeout=8) as resp:
+                data = json.loads(resp.read().decode())
+                return bool(data.get("ok"))
+        except Exception:
+            pass
+        logger.error(f"Direct Bot DM HTTP xatosi (user={user_telegram_id}): {he.code}")
+        return False
     except Exception as e:
-        logger.debug(f"Direct Bot DM yuborishda xato (user={user_telegram_id}): {e}")
+        logger.error(f"Direct Bot DM yuborishda xato (user={user_telegram_id}): {e}")
         return False
 
 
@@ -221,8 +239,22 @@ def _send_via_bot_api(formatted_text: str) -> int | None:
             data = json.loads(resp.read().decode())
             if data.get("ok"):
                 return data["result"]["message_id"]
-    except urllib.error.HTTPError as e:
-        logger.error(f"Bot API HTTP xatosi: {e.code} - {e.read().decode()[:200]}")
+    except urllib.error.HTTPError as he:
+        try:
+            clean_text = re.sub(r"<[^>]+>", "", formatted_text)
+            payload_plain = json.dumps({
+                "chat_id": config.MAIN_GROUP_ID,
+                "text": clean_text,
+                "disable_web_page_preview": True,
+            }).encode("utf-8")
+            req_plain = urllib.request.Request(url, data=payload_plain, headers={"Content-Type": "application/json"})
+            with urllib.request.urlopen(req_plain, timeout=10) as resp:
+                data = json.loads(resp.read().decode())
+                if data.get("ok"):
+                    return data["result"]["message_id"]
+        except Exception:
+            pass
+        logger.error(f"Bot API HTTP xatosi: {he.code}")
     except Exception as e:
         logger.error(f"Bot API orqali yuborishda xatolik: {e}")
     return None
@@ -271,7 +303,7 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
             for fid, user_tg_id, f_orig, f_dest, f_veh, f_ton in active_filters:
                 cf = CargoFilter(origin=f_orig, destination=f_dest, vehicle_type=f_veh, tonnage=f_ton)
                 if matches(cf, parsed):
-                    # 1. Shaxsiy chatga yuborish navbatiga qo'shish (Non-blocking queue)
+                    # To'g'ridan-to'g'ri shaxsiy bot DM xabarnomasi yuborish
                     try:
                         dm_text = build_dm_match_message(
                             origin=parsed.origin,
@@ -289,11 +321,12 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
                             sender_id=sender_id,
                             original_text=text,
                         )
-                        _DM_DISPATCH_QUEUE.put_nowait((user_tg_id, dm_text, time.time()))
+                        sent_ok = _send_direct_bot_dm(user_tg_id, dm_text)
+                        logger.info(f"Direct DM yuborildi: user_id={user_tg_id}, filter_id={fid}, success={sent_ok}")
                     except Exception as ex:
-                        logger.error(f"DM navbatiga qo'shishda xatolik: {ex}")
+                        logger.error(f"Direct DM yuborishda xatolik: {ex}")
 
-                    # 2. Redis orqali ham publish qilish
+                    # Redis orqali ham publish qilish
                     redis_bus.publish_match(user_tg_id, cargo_msg_id)
                     logger.info(f"Moslik topildi: filter#{fid} -> user {user_tg_id}")
 
