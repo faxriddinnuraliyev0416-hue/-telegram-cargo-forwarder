@@ -27,7 +27,7 @@ from app.models import SourceChat, SourceType, CargoMessage, ProcessingStatus, C
 from app.parser import parse_message, ParsedCargo
 from app.dedup import compute_hash
 from app.matcher import matches
-from app.utils.formatting import build_forwarded_message
+from app.utils.formatting import build_forwarded_message, build_dm_match_message
 from app.utils.logging_config import setup_logging
 from app import redis_bus
 from app.services.session_service import record_heartbeat, log_error
@@ -38,13 +38,29 @@ logger = setup_logging("userbot")
 _DEDUP_CACHE_MAX = 20000
 _DEDUP_SET: set[str] = set()
 _DEDUP_QUEUE: deque[str] = deque()
-
-_ACTIVE_FILTERS_CACHE: list[tuple[int, int, str, str, str | None, str | None]] = []
-_LAST_FILTERS_REFRESH = 0.0
-
-# Pre-resolved Main Group Peer
-_MAIN_GROUP_PEER = None
 _WATCHED_CHATS_MAP: dict[int | str, tuple[int, str, str | None, bool]] = {}
+_MAIN_GROUP_PEER = None
+_ACTIVE_FILTERS_CACHE: list[tuple[int, int, str, str, str | None, str | None]] = []
+_LAST_FILTERS_REFRESH: float = 0.0
+
+
+def _send_direct_bot_dm(user_telegram_id: int, text: str) -> bool:
+    """Telegram Bot API orqali foydalanuvchiga to'g'ridan-to'g'ri DM xabarnoma yuborish."""
+    url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id": user_telegram_id,
+        "text": text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+            return bool(data.get("ok"))
+    except Exception as e:
+        logger.debug(f"Direct Bot DM yuborishda xato (user={user_telegram_id}): {e}")
+        return False
 
 
 def _get_all_chat_keys(chat_id: int | str, username: str | None = None) -> list[int | str]:
@@ -237,11 +253,34 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
         session.commit()
         cargo_msg_id = cargo_msg.id
 
-        if parsed.origin and parsed.destination:
+        if parsed.is_cargo:
             active_filters = _get_active_filters_fast()
             for fid, user_tg_id, f_orig, f_dest, f_veh, f_ton in active_filters:
                 cf = CargoFilter(origin=f_orig, destination=f_dest, vehicle_type=f_veh, tonnage=f_ton)
                 if matches(cf, parsed):
+                    # 1. To'g'ridan-to'g'ri Bot API orqali shaxsiy DM yuborish
+                    try:
+                        dm_text = build_dm_match_message(
+                            origin=parsed.origin,
+                            destination=parsed.destination,
+                            vehicle_types=parsed.vehicle_types,
+                            tonnage=parsed.tonnage or parsed.volume,
+                            volume=None,
+                            cargo_type=parsed.cargo_type,
+                            price=parsed.price,
+                            phones=parsed.phones,
+                            source_title=chat_row.title if chat_row else "Telegram guruh",
+                            source_username=chat_row.username if chat_row else None,
+                            sender_name=sender_name,
+                            sender_username=sender_username,
+                            sender_id=sender_id,
+                            original_text=text,
+                        )
+                        _send_direct_bot_dm(user_tg_id, dm_text)
+                    except Exception as ex:
+                        logger.error(f"Direct DM yuborishda xatolik: {ex}")
+
+                    # 2. Redis orqali ham publish qilish
                     redis_bus.publish_match(user_tg_id, cargo_msg_id)
                     logger.info(f"Moslik topildi: filter#{fid} -> user {user_tg_id}")
 
