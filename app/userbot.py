@@ -544,7 +544,7 @@ async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
                             continue
                         if m.date:
                             msg_utc = m.date.replace(tzinfo=None)
-                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
+                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 86400:
                                 continue
 
                         dedup_hash = compute_hash(m.text)
