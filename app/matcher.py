@@ -96,23 +96,34 @@ def matches(cargo_filter: CargoFilter, parsed: ParsedCargo) -> bool:
     if not parsed.is_cargo:
         return False
 
-    # 1. Qayerdan filtri
-    if not _is_wildcard(cargo_filter.origin):
-        has_origin_match = (
-            _location_matches(cargo_filter.origin, parsed.origin) or
-            _location_matches(cargo_filter.origin, parsed.destination)
-        )
-        if not has_origin_match:
-            return False
+    orig_wild = _is_wildcard(cargo_filter.origin)
+    dest_wild = _is_wildcard(cargo_filter.destination)
 
-    # 2. Qayerga filtri
-    if not _is_wildcard(cargo_filter.destination):
-        has_dest_match = (
-            _location_matches(cargo_filter.destination, parsed.destination) or
-            _location_matches(cargo_filter.destination, parsed.origin)
-        )
-        if not has_dest_match:
-            return False
+    # Agar ikkala yo'nalish ham wildcard bo'lsa -> barcha yuklar mos keladi
+    if not (orig_wild and dest_wild):
+        # 1. Qayerdan filtri
+        orig_matched = orig_wild or _location_matches(cargo_filter.origin, parsed.origin) or _location_matches(cargo_filter.origin, parsed.destination)
+        # 2. Qayerga filtri
+        dest_matched = dest_wild or _location_matches(cargo_filter.destination, parsed.destination) or _location_matches(cargo_filter.destination, parsed.origin)
+
+        if not orig_wild and not dest_wild:
+            # Agar e'londa ikkala shahar ham bo'lsa -> ikkalasi mos bo'lishi kerak
+            if parsed.origin and parsed.destination:
+                if not (orig_matched and dest_matched):
+                    return False
+            # Agar e'londa faqat bitta shahar ko'rsatilgan bo'lsa va u mos kelsa -> mos deb olamiz
+            elif parsed.origin:
+                if not orig_matched:
+                    return False
+            elif parsed.destination:
+                if not dest_matched:
+                    return False
+            else:
+                # E'londa umuman shahar yo'q bo'lsa
+                return False
+        else:
+            if not (orig_matched and dest_matched):
+                return False
 
     # 3. Mashina turi filtri
     if not _is_wildcard(cargo_filter.vehicle_type):
