@@ -1,4 +1,4 @@
-﻿"""
+"""
 Yagona process orqali Bot va Userbotni parallel ishga tushirish skripti.
 Render yoki bitta server/workerda barcha xizmatlarni birgalikda yurgazish uchun ishlatiladi.
 """
@@ -6,12 +6,40 @@ import os
 import signal
 import subprocess
 import sys
+import threading
 import time
+from http.server import HTTPServer, BaseHTTPRequestHandler
+
+
+class HealthCheckHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.send_header("Content-type", "text/plain; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(b"OK - Telegram Cargo Forwarder is active.")
+
+    def log_message(self, format, *args):
+        pass  # Health-check pinglarini logga chiqarmaslik
+
+
+def start_health_server():
+    port = int(os.getenv("PORT", 10000))
+    try:
+        server = HTTPServer(("0.0.0.0", port), HealthCheckHandler)
+        print(f"[HealthCheck] Port {port} da tekshiruv serveri faol.")
+        server.serve_forever()
+    except Exception as e:
+        print(f"[HealthCheck] Server xatosi: {e}")
+
 
 def main():
     print("==================================================")
     print("  Telegram Cargo Forwarder — Xizmatlar ishga tushirilmoqda...")
     print("==================================================")
+
+    # 0. Render Web Service uchun healthcheck serverini fonda ishga tushirish
+    h_thread = threading.Thread(target=start_health_server, daemon=True)
+    h_thread.start()
 
     # 1. DB initsializatsiyasi
     print("[1/3] Baza jadvallari tekshirilmoqda...")
