@@ -118,10 +118,13 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
                 sources_to_check.append(ident)
 
         for ref in sources_to_check:
+            ref_clean = str(ref).strip().rstrip(".")
+            if not ref_clean:
+                continue
             try:
-                entity = await client.get_entity(ref)
+                entity = await client.get_entity(ref_clean)
             except Exception as e:
-                logger.warning(f"Manba chatga ulanib bo'lmadi: {ref} — {e}")
+                logger.warning(f"Manba chatga ulanib bo'lmadi: {ref_clean} — {e}")
                 continue
 
             full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
@@ -486,7 +489,7 @@ async def main():
         if not row_info or not row_info[3]:  # not active
             return
 
-        # Asinxron parallel task (kutishsiz)
+        logger.info(f"Yangi xabar qabul qilindi: {row_info[1]} (chat_id={full_chat_id})")
         asyncio.create_task(
             _process_new_message(client, event, row_info[0], row_info[1], row_info[2])
         )

@@ -81,37 +81,33 @@ def main():
     except Exception as e:
         print(f"Baza initsializatsiyasida ogohlantirish: {e}")
 
-    # 2. Jarayonlarni ishga tushirish
-    print("[2/3] Bot processi ishga tushirilmoqda...")
-    p_bot = subprocess.Popen([sys.executable, "-m", "app.bot.main"])
+    # 2. Jarayonlarni doimiy nazorat ostida (Auto-Restart Supervisor) ishga tushirish
+    env = dict(os.environ, PYTHONUNBUFFERED="1")
 
-    print("[3/3] Userbot processi ishga tushirilmoqda...")
-    p_userbot = subprocess.Popen([sys.executable, "-m", "app.userbot"])
+    def run_supervised(module_name: str):
+        while True:
+            try:
+                print(f"[{module_name}] Ishga tushirilmoqda (python -m {module_name})...")
+                p = subprocess.Popen([sys.executable, "-m", module_name], env=env)
+                p.wait()
+                print(f"[{module_name}] To'xtadi (kod: {p.returncode}). 3 soniyada avtomatik qayta boshlanadi...")
+            except Exception as exc:
+                print(f"[{module_name}] Xatolik yuz berdi: {exc}")
+            time.sleep(3)
 
-    def shutdown_all(*args):
-        print("\nTo'xtatish signali qabul qilindi. Jarayonlar yakunlanmoqda...")
-        p_bot.terminate()
-        p_userbot.terminate()
-        sys.exit(0)
+    t_bot = threading.Thread(target=run_supervised, args=("app.bot.main",), daemon=True)
+    t_userbot = threading.Thread(target=run_supervised, args=("app.userbot",), daemon=True)
 
-    signal.signal(signal.SIGINT, shutdown_all)
-    signal.signal(signal.SIGTERM, shutdown_all)
+    t_bot.start()
+    t_userbot.start()
 
-    print("Barcha xizmatlar muvaffaqiyatli ishga tushirildi.")
+    print("Barcha xizmatlar (Bot, Userbot, HealthServer, KeepAlive) to'liq ishga tushirildi.")
 
     try:
         while True:
-            if p_bot.poll() is not None:
-                print("Bot processi to'xtadi! Userbot ham to'xtatilmoqda...")
-                p_userbot.terminate()
-                sys.exit(1)
-            if p_userbot.poll() is not None:
-                print("Userbot processi to'xtadi! Bot ham to'xtatilmoqda...")
-                p_bot.terminate()
-                sys.exit(1)
-            time.sleep(2)
+            time.sleep(10)
     except KeyboardInterrupt:
-        shutdown_all()
+        print("\nTo'xtatish signali qabul qilindi.")
 
 if __name__ == "__main__":
     main()
