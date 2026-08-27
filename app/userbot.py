@@ -197,8 +197,8 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
             for k in _get_all_chat_keys(full_chat_id, username):
                 _WATCHED_CHATS_MAP[k] = info
 
-            # Manba guruh/kanalga a'zo bo'lish (Telegram updates oqimini to'liq qabul qilish uchun)
-            if isinstance(entity, (Channel, Chat)):
+            # Faqat agar akkaunt guruhda bo'lmasa, a'zo bo'lishga urinish
+            if isinstance(entity, (Channel, Chat)) and getattr(entity, "left", False):
                 try:
                     await client(JoinChannelRequest(entity))
                 except Exception:
@@ -563,7 +563,10 @@ async def main():
         auto_reconnect=True,
         sequential_updates=False,
     )
-    await client.start()
+    await client.connect()
+    if not await client.is_user_authorized():
+        logger.error("KRITIK: Telethon sessiyasi avtorizatsiyadan o'tmagan!")
+        return
 
     logger.info("Userbot muvaffaqiyatli ulandi (Ultra-fast zero-latency engine).")
 
@@ -636,11 +639,14 @@ async def main():
         if not row_info:
             chat = getattr(event, "chat", None)
             username = getattr(chat, "username", None) if chat else None
+            title = getattr(chat, "title", None) or "Yuk Guruhi"
             if username:
                 for uk in (username.lower(), f"@{username.lower()}"):
                     if uk in _WATCHED_CHATS_MAP:
                         row_info = _WATCHED_CHATS_MAP[uk]
                         break
+            if not row_info:
+                row_info = (1, title, username, True)
 
         if not row_info or not row_info[3]:  # not active
             return
