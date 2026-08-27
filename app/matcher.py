@@ -10,20 +10,29 @@ from app.models import CargoFilter
 from app.parser import ParsedCargo
 
 
-def _location_matches(filter_value: str | None, parsed_value: str | None) -> bool:
-    if not filter_value:
+def _is_wildcard(val: str | None) -> bool:
+    if not val:
         return True
-    fv = geodata.normalize(filter_value)
-    if not fv or fv in ("istalgan", "barchasi", "har qanday", "hamma", "all", "*", "-", "shart emas"):
+    norm = geodata.normalize(val)
+    if not norm:
         return True
+    if any(w in norm for w in ("istalgan", "barchasi", "har qanday", "hamma", "shart emas", "all", "*", "yoq", "yo'q")):
+        return True
+    return norm in ("-", "")
 
+
+def _location_matches(filter_value: str | None, parsed_value: str | None) -> bool:
+    if _is_wildcard(filter_value):
+        return True
     if not parsed_value:
         return False
+
+    fv = geodata.normalize(filter_value)
     pv = geodata.normalize(parsed_value)
-    if not pv:
+    if not fv or not pv:
         return False
 
-    # Aniq nom mosligi
+    # Aniq nom yoki qisman nom mosligi
     if fv == pv or fv in pv or pv in fv:
         return True
 
@@ -46,14 +55,12 @@ def _location_matches(filter_value: str | None, parsed_value: str | None) -> boo
 
 
 def _vehicle_matches(filter_value: str | None, parsed_types: list[str]) -> bool:
-    if not filter_value:
-        return True
-    fv = geodata.normalize(filter_value)
-    if not fv or fv in ("istalgan", "barchasi", "har qanday", "hamma", "shart emas", "-", "all"):
+    if _is_wildcard(filter_value):
         return True
     if not parsed_types:
-        return True  # Xabarda mashina turi yozilmagan bo'lsa, yukni o'tkazib yubormaymiz
+        return True  # Xabarda mashina ko'rsatilmagan bo'lsa, yukni o'tkazib yubormaymiz
 
+    fv = geodata.normalize(filter_value)
     return any(fv in geodata.normalize(pt) or geodata.normalize(pt) in fv for pt in parsed_types)
 
 
@@ -68,8 +75,11 @@ def _tonnage_bounds(value: str | None) -> tuple[float, float] | None:
 
 
 def _tonnage_matches(filter_value: str | None, parsed_value: str | None) -> bool:
-    if not filter_value or geodata.normalize(filter_value) in ("istalgan", "barchasi", "har qanday", "shart emas", "-", "all"):
+    if _is_wildcard(filter_value):
         return True
+    if not parsed_value:
+        return True  # Xabarda tonnaj yozilmagan bo'lsa, yukni o'tkazib yubormaymiz
+
     filter_bounds = _tonnage_bounds(filter_value)
     parsed_bounds = _tonnage_bounds(parsed_value)
     if not filter_bounds or not parsed_bounds:
@@ -78,18 +88,40 @@ def _tonnage_matches(filter_value: str | None, parsed_value: str | None) -> bool
 
 
 def matches(cargo_filter: CargoFilter, parsed: ParsedCargo) -> bool:
-    """True qaytaradi, agar parsed xabar shu filtrga mos kelsa."""
-    # Kamida bitta yo'nalish yoki yuk signali bo'lishi kerak
+    """
+    Keng qamrovli va moslashuvchan moslik tekshiruvi.
+    Faqat 100% qat'iy emas, balki qisman va yo'nalish bo'yicha mos yuklarni ham
+    foydalanuvchiga yetkazadi.
+    """
     if not parsed.is_cargo:
         return False
 
-    if cargo_filter.origin and not _location_matches(cargo_filter.origin, parsed.origin):
-        return False
-    if cargo_filter.destination and not _location_matches(cargo_filter.destination, parsed.destination):
-        return False
-    if not _vehicle_matches(cargo_filter.vehicle_type, parsed.vehicle_types):
-        return False
-    if not _tonnage_matches(cargo_filter.tonnage, parsed.tonnage):
-        return False
+    # 1. Qayerdan filtri
+    if not _is_wildcard(cargo_filter.origin):
+        has_origin_match = (
+            _location_matches(cargo_filter.origin, parsed.origin) or
+            _location_matches(cargo_filter.origin, parsed.destination)
+        )
+        if not has_origin_match:
+            return False
+
+    # 2. Qayerga filtri
+    if not _is_wildcard(cargo_filter.destination):
+        has_dest_match = (
+            _location_matches(cargo_filter.destination, parsed.destination) or
+            _location_matches(cargo_filter.destination, parsed.origin)
+        )
+        if not has_dest_match:
+            return False
+
+    # 3. Mashina turi filtri
+    if not _is_wildcard(cargo_filter.vehicle_type):
+        if parsed.vehicle_types and not _vehicle_matches(cargo_filter.vehicle_type, parsed.vehicle_types):
+            return False
+
+    # 4. Tonnaj filtri
+    if not _is_wildcard(cargo_filter.tonnage):
+        if parsed.tonnage and not _tonnage_matches(cargo_filter.tonnage, parsed.tonnage):
+            return False
 
     return True
