@@ -32,14 +32,47 @@ def start_health_server():
         print(f"[HealthCheck] Server xatosi: {e}")
 
 
+def start_keep_alive_pinger():
+    """
+    Render Free Web Service 15 daqiqada uxlab qolishini oldini olish uchun
+    har 5-7 daqiqada tashqi URL'ga avtomatik HTTP GET so'rov yuboruvchi doimiy pinger.
+    """
+    import urllib.request
+
+    url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-cargo-forwarder.onrender.com").strip()
+    interval = int(os.getenv("KEEP_ALIVE_INTERVAL_MINUTES", "6")) * 60
+    if not url:
+        return
+
+    print(f"[AntiSleep-KeepAlive] O'z-o'zini uyg'otib turuvchi pinger faollashtirildi (har {interval//60} daqiqada -> {url})")
+    time.sleep(45)  # Server to'liq ko'tarilishini kutish
+
+    while True:
+        try:
+            req = urllib.request.Request(
+                url,
+                headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) CargoBot-KeepAlive/1.0"}
+            )
+            with urllib.request.urlopen(req, timeout=15) as resp:
+                if resp.status == 200:
+                    current_time = time.strftime("%Y-%m-%d %H:%M:%S")
+                    print(f"[AntiSleep-KeepAlive] {current_time} — Ping yuborildi (HTTP 200 OK). Server 100% uyg'oq.")
+        except Exception as e:
+            print(f"[AntiSleep-KeepAlive] Ping ogohlantirish: {e}")
+        time.sleep(interval)
+
+
 def main():
     print("==================================================")
     print("  Telegram Cargo Forwarder — Xizmatlar ishga tushirilmoqda...")
     print("==================================================")
 
-    # 0. Render Web Service uchun healthcheck serverini fonda ishga tushirish
+    # 0. Render Web Service uchun healthcheck serverini va KeepAlive pingerini fonda ishga tushirish
     h_thread = threading.Thread(target=start_health_server, daemon=True)
     h_thread.start()
+
+    pinger_thread = threading.Thread(target=start_keep_alive_pinger, daemon=True)
+    pinger_thread.start()
 
     # 1. DB initsializatsiyasi
     print("[1/3] Baza jadvallari tekshirilmoqda...")

@@ -14,7 +14,7 @@ import datetime
 import time
 from collections import deque
 
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, User as TgUser
 
@@ -161,7 +161,7 @@ def _sender_display_info(sender):
     return title, getattr(sender, "username", None), getattr(sender, "id", None)
 
 
-_FORWARD_SEMAPHORE = asyncio.Semaphore(10)
+_FORWARD_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
 
 
 def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id: int | None,
@@ -222,9 +222,106 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
         session.close()
 
 
+async def _forward_worker(client: TelegramClient):
+    """
+    Xabarlarni kanalga bir necha soniya farq (smooth pacing delay) bilan,
+    navbat asosida va Telegram FloodWait cheklovlaridan 100% himoyalangan holda
+    xavfsiz yuboruvchi doimiy ishchi (Worker).
+    """
+    global _MAIN_GROUP_PEER
+    logger.info(f"Forward worker faol. Xabarlar oralig'i: {config.FORWARD_DELAY_SECONDS} soniya.")
+
+    while True:
+        try:
+            item = await _FORWARD_QUEUE.get()
+            (
+                source_chat_row_id,
+                message_id,
+                sender_id,
+                sender_username,
+                sender_name,
+                text,
+                msg_date,
+                parsed,
+                dedup_hash,
+                formatted,
+            ) = item
+
+            target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
+            main_group_msg_id = None
+
+            # Xabarni guruhga yuborish (FloodWait himoyasi va avtomatik retry bilan)
+            retry_count = 0
+            while retry_count < 3:
+                try:
+                    sent = await client.send_message(
+                        target_peer,
+                        formatted,
+                        parse_mode="html",
+                        link_preview=False,
+                    )
+                    main_group_msg_id = sent.id
+                    break
+                except errors.FloodWaitError as fe:
+                    wait_sec = fe.seconds + 1
+                    logger.warning(f"Telegram FloodWait: {wait_sec} soniya kutilmoqda...")
+                    await asyncio.sleep(wait_sec)
+                    retry_count += 1
+                except Exception as e:
+                    logger.error(f"Asosiy guruhga yuborishda xato: {e}")
+                    log_error("userbot_forward", str(e))
+                    try:
+                        _MAIN_GROUP_PEER = await client.get_input_entity(config.MAIN_GROUP_ID)
+                        target_peer = _MAIN_GROUP_PEER
+                    except Exception:
+                        pass
+                    retry_count += 1
+                    await asyncio.sleep(1.0)
+
+            # DB ga saqlash va DM matching'ni fonda tezkor bajarish
+            asyncio.to_thread(
+                _sync_save_db_and_match,
+                source_chat_row_id=source_chat_row_id,
+                message_id=message_id,
+                sender_id=sender_id,
+                sender_username=sender_username,
+                sender_name=sender_name,
+                text=text,
+                message_date=msg_date,
+                parsed=parsed,
+                dedup_hash=dedup_hash,
+                main_group_msg_id=main_group_msg_id,
+            )
+
+            _FORWARD_QUEUE.task_done()
+
+            # Habarlar bir necha soniya farq bilan tushishi uchun intervalli kutish
+            if config.FORWARD_DELAY_SECONDS > 0:
+                await asyncio.sleep(config.FORWARD_DELAY_SECONDS)
+
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"Forward workerda kutilmagan xato: {e}")
+            await asyncio.sleep(1.0)
+
+
+async def _second_interval_monitor():
+    """
+    Har soniyada xabarlar navbati va tizim faolligini nazorat qiluvchi monitor.
+    """
+    while True:
+        try:
+            qsize = _FORWARD_QUEUE.qsize()
+            if qsize > 5:
+                logger.info(f"[Har soniya nazorat] Navbatda {qsize} ta xabar yuborilish arafasida.")
+        except Exception as e:
+            logger.debug(f"Har soniya monitor ogohlantirish: {e}")
+        await asyncio.sleep(1.0)
+
+
 async def _process_new_message(client: TelegramClient, event, source_chat_row_id: int,
                                source_title: str, source_username: str | None):
-    global _MAIN_GROUP_PEER
     try:
         message = event.message
         text = message.raw_text or ""
@@ -254,7 +351,7 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
         if not sender_name and not sender_username and event.sender_id:
             sender_id = event.sender_id
 
-        # 4. KANALGA DARHOL FORWARD QILISH (FAST PATH — PARALLEL SEMAPHORE)
+        # 4. Chiroyli formatlangan xabar yaratish
         formatted = build_forwarded_message(
             source_title=source_title,
             source_username=source_username,
@@ -272,42 +369,24 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
             phones=parsed.phones,
         )
 
-        target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
-        main_group_msg_id = None
-        async with _FORWARD_SEMAPHORE:
-            try:
-                sent = await client.send_message(
-                    target_peer,
-                    formatted,
-                    parse_mode="html",
-                    link_preview=False,
-                )
-                main_group_msg_id = sent.id
-            except Exception as e:
-                logger.error(f"Asosiy guruhga tezkor yuborishda xato: {e}")
-                log_error("userbot_forward", str(e))
-                try:
-                    _MAIN_GROUP_PEER = await client.get_input_entity(config.MAIN_GROUP_ID)
-                    sent = await client.send_message(_MAIN_GROUP_PEER, formatted, parse_mode="html", link_preview=False)
-                    main_group_msg_id = sent.id
-                except Exception as e2:
-                    logger.error(f"Qayta urinishda ham xato: {e2}")
-
-        # 5. DB yozuvini va matching xabarnomasini alohida THREAD'da bajarish (Asinxron event loop qotmaydi)
+        # 5. NAVBATGA QO'SHISH (FAST NON-BLOCKING QUEUE)
         msg_date = message.date.replace(tzinfo=None) if message.date else datetime.datetime.utcnow()
-        asyncio.to_thread(
-            _sync_save_db_and_match,
-            source_chat_row_id=source_chat_row_id,
-            message_id=message.id,
-            sender_id=sender_id,
-            sender_username=sender_username,
-            sender_name=sender_name,
-            text=text,
-            message_date=msg_date,
-            parsed=parsed,
-            dedup_hash=dedup_hash,
-            main_group_msg_id=main_group_msg_id,
+        queue_item = (
+            source_chat_row_id,
+            message.id,
+            sender_id,
+            sender_username,
+            sender_name,
+            text,
+            msg_date,
+            parsed,
+            dedup_hash,
+            formatted,
         )
+        _FORWARD_QUEUE.put_nowait(queue_item)
+        qsize = _FORWARD_QUEUE.qsize()
+        if qsize > 1:
+            logger.info(f"Yangi e'lon navbatga qo'shildi (Navbatdagi jami: {qsize})")
 
     except Exception as e:
         logger.exception(f"Xabarni qayta ishlashda kutilmagan xato: {e}")
@@ -381,8 +460,10 @@ async def main():
 
     _get_active_filters_fast()
 
-    # Heartbeat vazifasi
+    # Doimiy fonda ishlovchi vazifalar:
     asyncio.create_task(_heartbeat_loop(client, lambda: len(entities)))
+    asyncio.create_task(_forward_worker(client))
+    asyncio.create_task(_second_interval_monitor())
 
     # Asosiy guruh ID larining barcha variantlarini chetlab o'tish uchun ro'yxat
     main_group_keys = set(_get_all_chat_keys(config.MAIN_GROUP_ID))
