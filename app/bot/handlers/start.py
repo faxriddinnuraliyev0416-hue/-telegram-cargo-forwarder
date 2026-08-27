@@ -1,9 +1,12 @@
+import logging
 from telegram import Update
 from telegram.ext import ContextTypes
 
 from app.db import get_session
-from app.models import User
+from app.models import User, CargoFilter
 from app.bot.handlers.filter_wizard import get_main_menu_keyboard, filter_start
+
+logger = logging.getLogger("bot.start")
 
 
 def _get_or_create_user(tg_user) -> User:
@@ -14,6 +17,23 @@ def _get_or_create_user(tg_user) -> User:
             user = User(telegram_id=tg_user.id, username=tg_user.username, first_name=tg_user.first_name)
             session.add(user)
             session.commit()
+            session.refresh(user)
+
+        # Agar foydalanuvchida hali hech qanday filtr bo'lmasa, avtomatik faol standart filtr yaratamiz
+        has_filter = session.query(CargoFilter).filter_by(user_id=user.id).first()
+        if not has_filter:
+            default_filter = CargoFilter(
+                user_id=user.id,
+                origin="Istalgan viloyat",
+                destination="Istalgan viloyat",
+                vehicle_type="Istalgan mashina",
+                tonnage="Istalgan tonnaj",
+                active=True,
+            )
+            session.add(default_filter)
+            session.commit()
+            logger.info(f"Foydalanuvchi ({tg_user.id}) uchun standart faol filtr yaratildi.")
+
         return user
     finally:
         session.close()

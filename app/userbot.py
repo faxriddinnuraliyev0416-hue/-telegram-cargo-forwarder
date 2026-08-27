@@ -591,6 +591,27 @@ async def main():
             info = (row.id, row.title, row.username, row.active)
             for k in _get_all_chat_keys(row.chat_id, row.username):
                 _WATCHED_CHATS_MAP[k] = info
+
+        # Adminlar uchun faol filtrlar mavjudligini ta'minlash
+        for admin_id in config.ADMIN_IDS:
+            admin_user = session.query(User).filter_by(telegram_id=admin_id).first()
+            if not admin_user:
+                admin_user = User(telegram_id=admin_id, username="admin", first_name="Admin", is_admin=True)
+                session.add(admin_user)
+                session.commit()
+                session.refresh(admin_user)
+            has_filter = session.query(CargoFilter).filter_by(user_id=admin_user.id).first()
+            if not has_filter:
+                session.add(CargoFilter(
+                    user_id=admin_user.id,
+                    origin="Istalgan viloyat",
+                    destination="Istalgan viloyat",
+                    vehicle_type="Istalgan mashina",
+                    tonnage="Istalgan tonnaj",
+                    active=True,
+                ))
+                session.commit()
+                logger.info(f"Admin ({admin_id}) uchun faol standart filtr avtomatik yaratildi.")
     finally:
         session.close()
 
