@@ -555,10 +555,10 @@ async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
                         )
                 except Exception as ex:
                     logger.debug(f"Fon skanida ogohlantirish: {ex}")
-                await asyncio.sleep(0.08)
+                await asyncio.sleep(0.6)
         except Exception as e:
             logger.error(f"Fon skaneri xatosi: {e}")
-        await asyncio.sleep(2.5)
+        await asyncio.sleep(10)
 
 
 async def main():
