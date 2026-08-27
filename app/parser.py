@@ -187,18 +187,22 @@ def classify_cargo(text: str, origin: str | None, destination: str | None,
     has_route = bool(origin and destination)
     has_vehicle = bool(vehicle_types)
     has_tonnage = bool(tonnage)
+    has_phone = bool(extract_phone_numbers(text))
 
-    # Agar yo'nalish bo'lsa VA (yuk so'zi yoki mashina yoki tonnaj bo'lsa) -> Yuk deb hisoblanadi
-    if has_route and (has_cargo_keyword or has_vehicle or has_tonnage):
+    if has_cargo_keyword:
         return True, None
 
-    # Agar "fura kerak", "isuzu kerak", "yuk bor", "20 t" bo'lsa
-    if has_cargo_keyword and (has_vehicle or has_tonnage or has_route):
+    if has_route and (has_vehicle or has_tonnage or has_phone):
         return True, None
 
-    # Agar yo'nalish bor, lekin yukka oid hech qanday signal yo'q bo'lsa -> rad
-    if has_route and not (has_cargo_keyword or has_vehicle or has_tonnage):
-        return False, "Yuk e'loni emas (oddiylashtirilgan taksi yoki chat)"
+    if has_vehicle and (has_tonnage or has_phone or origin or destination):
+        return True, None
+
+    if has_tonnage and (has_route or has_phone or origin or destination):
+        return True, None
+
+    if has_route:
+        return True, None
 
     return False, "Yuk haqida ma'lumot topilmadi"
 

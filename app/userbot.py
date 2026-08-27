@@ -11,12 +11,15 @@ Vazifalari:
 """
 import asyncio
 import datetime
+import json
 import time
+import urllib.request
 from collections import deque
 
 from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, User as TgUser
+from telethon.tl.functions.channels import JoinChannelRequest
 
 from app import config, geodata
 from app.db import get_session, init_db
@@ -148,6 +151,13 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
             for k in _get_all_chat_keys(full_chat_id, username):
                 _WATCHED_CHATS_MAP[k] = info
 
+            # Manba guruh/kanalga a'zo bo'lish (Telegram updates oqimini to'liq qabul qilish uchun)
+            if isinstance(entity, (Channel, Chat)):
+                try:
+                    await client(JoinChannelRequest(entity))
+                except Exception:
+                    pass
+
             entities.append(entity)
         return entities
     finally:
@@ -165,6 +175,28 @@ def _sender_display_info(sender):
 
 
 _FORWARD_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
+
+
+def _send_via_bot_api(formatted_text: str) -> int | None:
+    """Bot API orqali asosiy guruh/kanalga 100% ishonchli va tezkor yuborish."""
+    url = f"https://api.telegram.org/bot{config.BOT_TOKEN}/sendMessage"
+    payload = json.dumps({
+        "chat_id": config.MAIN_GROUP_ID,
+        "text": formatted_text,
+        "parse_mode": "HTML",
+        "disable_web_page_preview": True,
+    }).encode("utf-8")
+    req = urllib.request.Request(url, data=payload, headers={"Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+            if data.get("ok"):
+                return data["result"]["message_id"]
+    except urllib.error.HTTPError as e:
+        logger.error(f"Bot API HTTP xatosi: {e.code} - {e.read().decode()[:200]}")
+    except Exception as e:
+        logger.error(f"Bot API orqali yuborishda xatolik: {e}")
+    return None
 
 
 def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id: int | None,
@@ -228,8 +260,7 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
 async def _forward_worker(client: TelegramClient):
     """
     Xabarlarni kanalga Zero-Latency tezlikda, adaptiv dinamik oraliq bilan
-    va Telegram FloodWait cheklovlaridan 100% himoyalangan holda
-    xavfsiz yuboruvchi yuqori unumli ishchi (Worker).
+    va 100% ishonchli yuboruvchi yuqori unumli ishchi (Worker).
     """
     global _MAIN_GROUP_PEER
     logger.info("Ultra-fast Zero-Latency forward worker faollashtirildi.")
@@ -258,13 +289,11 @@ async def _forward_worker(client: TelegramClient):
                 _FORWARD_QUEUE.task_done()
                 continue
 
-            target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
-            main_group_msg_id = None
-
-            # Xabarni guruhga yuborish (FloodWait himoyasi va avtomatik retry bilan)
-            retry_count = 0
-            while retry_count < 3:
+            # Xabarni guruh/kanalga yuborish (Bot API asosiy, Userbot zaxira)
+            main_group_msg_id = await asyncio.to_thread(_send_via_bot_api, formatted)
+            if not main_group_msg_id:
                 try:
+                    target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
                     sent = await client.send_message(
                         target_peer,
                         formatted,
@@ -272,22 +301,9 @@ async def _forward_worker(client: TelegramClient):
                         link_preview=False,
                     )
                     main_group_msg_id = sent.id
-                    break
-                except errors.FloodWaitError as fe:
-                    wait_sec = fe.seconds + 0.5
-                    logger.warning(f"Telegram FloodWait: {wait_sec} soniya kutilmoqda...")
-                    await asyncio.sleep(wait_sec)
-                    retry_count += 1
                 except Exception as e:
-                    logger.error(f"Asosiy guruhga yuborishda xato: {e}")
+                    logger.error(f"Userbot orqali yuborishda ham xato: {e}")
                     log_error("userbot_forward", str(e))
-                    try:
-                        _MAIN_GROUP_PEER = await client.get_input_entity(config.MAIN_GROUP_ID)
-                        target_peer = _MAIN_GROUP_PEER
-                    except Exception:
-                        pass
-                    retry_count += 1
-                    await asyncio.sleep(0.5)
 
             # DB ga saqlash va DM matching'ni fonda tezkor bajarish
             asyncio.to_thread(
@@ -306,7 +322,7 @@ async def _forward_worker(client: TelegramClient):
 
             _FORWARD_QUEUE.task_done()
 
-            # Adaptiv tezlik: navbat bo'sh bo'lsa qisqa (0.2s-0.3s) oraliq, navbat to'plansa minimal (0.05s) tezlashish
+            # Adaptiv tezlik
             qsize = _FORWARD_QUEUE.qsize()
             if qsize > 4:
                 sleep_delay = 0.05
