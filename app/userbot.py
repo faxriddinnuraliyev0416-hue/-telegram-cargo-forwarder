@@ -22,6 +22,20 @@ from telethon import TelegramClient, events, errors
 from telethon.sessions import StringSession
 from telethon.tl.types import Channel, Chat, User as TgUser
 from telethon.tl.functions.channels import JoinChannelRequest
+import telethon.extensions.binaryreader as _br
+
+# --- Telegram MTProto Layer Compatibility Patch ---
+_orig_tgread_object = _br.BinaryReader.tgread_object
+
+def _safe_tgread_object(self):
+    try:
+        return _orig_tgread_object(self)
+    except Exception as e:
+        if "Constructor ID" in str(e) or "TypeNotFoundError" in str(type(e)):
+            return None
+        raise
+
+_br.BinaryReader.tgread_object = _safe_tgread_object
 
 from app import config, geodata
 from app.db import get_session, init_db

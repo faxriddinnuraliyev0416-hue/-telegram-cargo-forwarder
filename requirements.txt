@@ -1,4 +1,4 @@
-telethon==1.36.0
+telethon>=1.40.0
 python-telegram-bot[job-queue]==21.4
 SQLAlchemy==2.0.32
 psycopg2-binary==2.9.9
