@@ -227,12 +227,12 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
 
 async def _forward_worker(client: TelegramClient):
     """
-    Xabarlarni kanalga bir necha soniya farq (smooth pacing delay) bilan,
-    navbat asosida va Telegram FloodWait cheklovlaridan 100% himoyalangan holda
-    xavfsiz yuboruvchi doimiy ishchi (Worker).
+    Xabarlarni kanalga Zero-Latency tezlikda, adaptiv dinamik oraliq bilan
+    va Telegram FloodWait cheklovlaridan 100% himoyalangan holda
+    xavfsiz yuboruvchi yuqori unumli ishchi (Worker).
     """
     global _MAIN_GROUP_PEER
-    logger.info(f"Forward worker faol. Xabarlar oralig'i: {config.FORWARD_DELAY_SECONDS} soniya.")
+    logger.info("Ultra-fast Zero-Latency forward worker faollashtirildi.")
 
     while True:
         try:
@@ -248,7 +248,15 @@ async def _forward_worker(client: TelegramClient):
                 parsed,
                 dedup_hash,
                 formatted,
+                enqueue_time,
             ) = item
+
+            # Eskirgan (navbatda 90 soniyadan ortiq qolib ketgan) xabarlarni tashlab yuborish
+            age = time.time() - enqueue_time
+            if age > 90.0:
+                logger.info(f"Eskirgan xabar ({age:.1f}s) kanalga yuborilmasdan o'tkazib yuborildi.")
+                _FORWARD_QUEUE.task_done()
+                continue
 
             target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
             main_group_msg_id = None
@@ -266,7 +274,7 @@ async def _forward_worker(client: TelegramClient):
                     main_group_msg_id = sent.id
                     break
                 except errors.FloodWaitError as fe:
-                    wait_sec = fe.seconds + 1
+                    wait_sec = fe.seconds + 0.5
                     logger.warning(f"Telegram FloodWait: {wait_sec} soniya kutilmoqda...")
                     await asyncio.sleep(wait_sec)
                     retry_count += 1
@@ -279,7 +287,7 @@ async def _forward_worker(client: TelegramClient):
                     except Exception:
                         pass
                     retry_count += 1
-                    await asyncio.sleep(1.0)
+                    await asyncio.sleep(0.5)
 
             # DB ga saqlash va DM matching'ni fonda tezkor bajarish
             asyncio.to_thread(
@@ -298,15 +306,23 @@ async def _forward_worker(client: TelegramClient):
 
             _FORWARD_QUEUE.task_done()
 
-            # Habarlar bir necha soniya farq bilan tushishi uchun intervalli kutish
-            if config.FORWARD_DELAY_SECONDS > 0:
-                await asyncio.sleep(config.FORWARD_DELAY_SECONDS)
+            # Adaptiv tezlik: navbat bo'sh bo'lsa qisqa (0.2s-0.3s) oraliq, navbat to'plansa minimal (0.05s) tezlashish
+            qsize = _FORWARD_QUEUE.qsize()
+            if qsize > 4:
+                sleep_delay = 0.05
+            elif qsize > 1:
+                sleep_delay = 0.1
+            else:
+                sleep_delay = max(0.1, config.FORWARD_DELAY_SECONDS)
+
+            if sleep_delay > 0:
+                await asyncio.sleep(sleep_delay)
 
         except asyncio.CancelledError:
             break
         except Exception as e:
             logger.exception(f"Forward workerda kutilmagan xato: {e}")
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.5)
 
 
 async def _second_interval_monitor():
@@ -345,8 +361,10 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
         _add_in_memory_dedup(dedup_hash)
         asyncio.create_task(redis_bus.async_cache_dedup_hash(dedup_hash))
 
-        # 2. Tezkor parsing
+        # 2. Tezkor parsing va FAQAT YUK E'LONLARINI SARALASH (Spam/Taksi/Suhbatlarni darhol o'tkazib yuborish)
         parsed = parse_message(text)
+        if not parsed.is_cargo:
+            return
 
         # 3. Yuboruvchi ma'lumotlarini olish
         sender = getattr(event, "sender", None)
@@ -374,6 +392,7 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
 
         # 5. NAVBATGA QO'SHISH (FAST NON-BLOCKING QUEUE)
         msg_date = message.date.replace(tzinfo=None) if message.date else datetime.datetime.utcnow()
+        enqueue_time = time.time()
         queue_item = (
             source_chat_row_id,
             message.id,
@@ -385,11 +404,12 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
             parsed,
             dedup_hash,
             formatted,
+            enqueue_time,
         )
         _FORWARD_QUEUE.put_nowait(queue_item)
         qsize = _FORWARD_QUEUE.qsize()
         if qsize > 1:
-            logger.info(f"Yangi e'lon navbatga qo'shildi (Navbatdagi jami: {qsize})")
+            logger.info(f"Yangi yuk e'loni navbatga qo'shildi (Navbatdagi jami: {qsize})")
 
     except Exception as e:
         logger.exception(f"Xabarni qayta ishlashda kutilmagan xato: {e}")

@@ -50,7 +50,7 @@ REDIS_MATCH_CHANNEL = "cargo:new_matches"
 REDIS_DEDUP_PREFIX = "cargo:dedup:"
 
 # --- Boshqalar ---
-FORWARD_DELAY_SECONDS = float(os.getenv("FORWARD_DELAY_SECONDS", "2.5"))
+FORWARD_DELAY_SECONDS = float(os.getenv("FORWARD_DELAY_SECONDS", "0.3"))
 RENDER_EXTERNAL_URL = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-cargo-forwarder.onrender.com").strip()
 KEEP_ALIVE_INTERVAL_MINUTES = int(os.getenv("KEEP_ALIVE_INTERVAL_MINUTES", "6"))
 MESSAGE_RETENTION_DAYS = _get_int("MESSAGE_RETENTION_DAYS", 30)
