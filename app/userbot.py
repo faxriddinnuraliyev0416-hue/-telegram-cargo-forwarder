@@ -538,7 +538,7 @@ async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
                     if not row_info[3]:
                         continue
 
-                    msgs = await client.get_messages(entity, limit=6)
+                    msgs = await client.get_messages(entity, limit=5)
                     for m in msgs:
                         if not m or not m.text:
                             continue
@@ -562,10 +562,10 @@ async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
                         )
                 except Exception as ex:
                     logger.debug(f"Fon skanida ogohlantirish: {ex}")
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.2)
         except Exception as e:
             logger.error(f"Fon skaneri xatosi: {e}")
-        await asyncio.sleep(12)
+        await asyncio.sleep(5)
 
 
 async def main():
@@ -596,6 +596,13 @@ async def main():
         return
 
     logger.info("Userbot muvaffaqiyatli ulandi (Ultra-fast zero-latency engine).")
+
+    # Entity keshni to'ldirish (Push eventlar to'g'ri ishlashi uchun)
+    try:
+        dialogs = await client.get_dialogs(limit=100)
+        logger.info(f"{len(dialogs)} ta dialog orqali entity kesh to'ldirildi.")
+    except Exception as ex:
+        logger.warning(f"Dialoglarni yuklashda ogohlantirish: {ex}")
 
     # Asosiy guruh peer'ini oldindan resolve qilib olamiz (RPC kutmaslik uchun)
     try:
