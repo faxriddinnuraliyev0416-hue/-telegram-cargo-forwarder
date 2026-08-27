@@ -8,6 +8,10 @@ from app import config
 logger = logging.getLogger("app.db")
 
 db_url = config.DATABASE_URL
+if db_url and db_url.startswith("postgres://"):
+    db_url = db_url.replace("postgres://", "postgresql+psycopg2://", 1)
+elif db_url and db_url.startswith("postgresql://") and not db_url.startswith("postgresql+"):
+    db_url = db_url.replace("postgresql://", "postgresql+psycopg2://", 1)
 if not db_url or "sqlite" in db_url:
     engine = create_engine(db_url or "sqlite:///cargo.db", connect_args={"check_same_thread": False} if "sqlite" in (db_url or "") else {}, future=True)
 else:
