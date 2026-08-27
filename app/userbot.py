@@ -222,13 +222,6 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
             _WATCHED_CHATS_MAP[entity.id] = info
             _WATCHED_CHATS_MAP[-entity.id] = info
 
-            # Guruh/kanalga a'zo bo'lish
-            try:
-                if isinstance(entity, (Channel, Chat)):
-                    await client(JoinChannelRequest(entity))
-            except Exception:
-                pass
-
             entities.append(entity)
         return entities
     finally:

@@ -40,12 +40,12 @@ def start_keep_alive_pinger():
     import urllib.request
 
     url = os.getenv("RENDER_EXTERNAL_URL", "https://telegram-cargo-forwarder.onrender.com").strip()
-    interval = int(os.getenv("KEEP_ALIVE_INTERVAL_MINUTES", "6")) * 60
+    interval = int(os.getenv("KEEP_ALIVE_INTERVAL_MINUTES", "2")) * 60
     if not url:
         return
 
     print(f"[AntiSleep-KeepAlive] O'z-o'zini uyg'otib turuvchi pinger faollashtirildi (har {interval//60} daqiqada -> {url})")
-    time.sleep(45)  # Server to'liq ko'tarilishini kutish
+    time.sleep(20)  # Server to'liq ko'tarilishini kutish
 
     while True:
         try:
