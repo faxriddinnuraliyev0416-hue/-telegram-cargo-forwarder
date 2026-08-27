@@ -66,13 +66,14 @@ _NON_CARGO_NEGATIVE_KEYWORDS = [
 # Yuk e'loni tasdiqlovchi so'zlar
 _CARGO_POSITIVE_KEYWORDS = [
     "yuk", "юк", "gruz", "груз", "tonna", "тонна", "tn", "тн", "fura", "фура", "tent", "тент",
-    "isuzu", "исузу", "kamaz", "камаз", "man", "ман", "gazel", "газель", "labo", "лабо", "damas",
-    "ref", "реф", "refrijerator", "bortovoy", "manipulyator", "samosval", "konteyner",
+    "isuzu", "исузу", "kamaz", "камаз", "man", "ман", "gazel", "газель", "labo", "лабо", "damas", "дамас",
+    "ref", "реф", "refrijerator", "bortovoy", "manipulyator", "samosval", "konteyner", "kiya", "kia", "porter",
     "sement", "семент", "gips", "un", "ун", "meva", "мева", "sabzavot", "kartoshka", "piyoz",
     "pomidor", "tarvuz", "qovun", "gilos", "olma", "yogoch", "yog'och", "taxta", "temir",
     "armatura", "truba", "mebel", "texnika", "uskuna", "stanok", "qop", "palet", "paletta",
-    "karobka", "doplata", "stavka", "dispetcher", "perevozka", "yuklash", "tushirish",
-    "yuk bor", "юк бор", "gruz bor", "груз есть", "mashina kerak", "машина керак", "fura kerak",
+    "karobka", "doplata", "stavka", "dispetcher", "perevozka", "yuklash", "tushirish", "moshina", "мошина",
+    "mashina", "машина", "yuk bor", "юк бор", "gruz bor", "груз есть", "mashina kerak", "машина керак",
+    "fura kerak", "фура керак", "bor", "бор", "kerak", "керак", "kk", "кк",
 ]
 
 
