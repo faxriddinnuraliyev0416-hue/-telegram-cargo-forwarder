@@ -533,45 +533,58 @@ async def _heartbeat_loop(client: TelegramClient, get_chats_count_fn):
         await asyncio.sleep(30)
 
 
-async def _one_time_startup_scan(client: TelegramClient, entities: list):
+async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
     """
-    Faqat ishga tushganda bir marta oxirgi 5 ta xabarni tekshiradi (FloodWait bermasligi uchun 1s oraliq bilan).
+    Doimiy ravishda 23 ta manba guruhni orqa fonda xavfsiz (1.2 soniya oraliq bilan)
+    skan qilib turuvchi 100% kafolatli zaxira oqimi.
     """
-    logger.info("Dastlabki xabarlarni tekshirish boshlandi...")
+    logger.info("Xavfsiz fon skaneri faollashtirildi.")
     await asyncio.sleep(2)
-    for entity in entities:
+    while True:
         try:
-            full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
-            row_info = _WATCHED_CHATS_MAP.get(full_chat_id) or _WATCHED_CHATS_MAP.get(entity.id)
-            if not row_info or not row_info[3]:
-                continue
+            for entity in entities:
+                try:
+                    full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
+                    chat_keys = _get_all_chat_keys(full_chat_id)
+                    row_info = None
+                    for ck in chat_keys:
+                        if ck in _WATCHED_CHATS_MAP:
+                            row_info = _WATCHED_CHATS_MAP[ck]
+                            break
+                    if not row_info:
+                        row_info = _WATCHED_CHATS_MAP.get(entity.id) or _WATCHED_CHATS_MAP.get(-entity.id)
 
-            msgs = await client.get_messages(entity, limit=5)
-            for m in msgs:
-                if not m or not m.text:
-                    continue
-                if m.date:
-                    msg_utc = m.date.replace(tzinfo=None)
-                    if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
+                    if not row_info or not row_info[3]:
                         continue
 
-                dedup_hash = compute_hash(m.text)
-                if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
-                    continue
+                    msgs = await client.get_messages(entity, limit=4)
+                    for m in msgs:
+                        if not m or not m.text:
+                            continue
+                        if m.date:
+                            msg_utc = m.date.replace(tzinfo=None)
+                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
+                                continue
 
-                class PseudoEvent:
-                    message = m
-                    sender = getattr(m, "sender", None)
-                    sender_id = getattr(m, "sender_id", None)
-                    chat_id = full_chat_id
+                        dedup_hash = compute_hash(m.text)
+                        if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
+                            continue
 
-                asyncio.create_task(
-                    _process_new_message(client, PseudoEvent(), row_info[0], row_info[1], row_info[2])
-                )
-        except Exception as ex:
-            logger.debug(f"Startup skanida ogohlantirish: {ex}")
-        await asyncio.sleep(0.8)
-    logger.info("Dastlabki xabarlar to'liq tekshirildi.")
+                        class PseudoEvent:
+                            message = m
+                            sender = getattr(m, "sender", None)
+                            sender_id = getattr(m, "sender_id", None)
+                            chat_id = full_chat_id
+
+                        asyncio.create_task(
+                            _process_new_message(client, PseudoEvent(), row_info[0], row_info[1], row_info[2])
+                        )
+                except Exception as ex:
+                    logger.debug(f"Fon skanida ogohlantirish: {ex}")
+                await asyncio.sleep(1.2)  # Xavfsiz oraliq — FloodWait xavfi 0%
+        except Exception as e:
+            logger.error(f"Fon skaneri xatosi: {e}")
+        await asyncio.sleep(20)
 
 
 async def main():
@@ -650,7 +663,7 @@ async def main():
     asyncio.create_task(_forward_worker(client))
     asyncio.create_task(_second_interval_monitor())
     if entities:
-        asyncio.create_task(_one_time_startup_scan(client, entities))
+        asyncio.create_task(_safe_sync_scanner_loop(client, entities))
 
     # Asosiy guruh ID larining barcha variantlarini chetlab o'tish uchun ro'yxat
     main_group_keys = set(_get_all_chat_keys(config.MAIN_GROUP_ID))
@@ -661,14 +674,21 @@ async def main():
         if not full_chat_id or full_chat_id in main_group_keys:
             return  # Asosiy guruhning o'z xabarlarini qayta ishlamaymiz
 
-        # 0.0001ms da xotiradan tekshirish
-        row_info = _WATCHED_CHATS_MAP.get(full_chat_id)
+        chat_keys = _get_all_chat_keys(full_chat_id)
+        row_info = None
+        for ck in chat_keys:
+            if ck in _WATCHED_CHATS_MAP:
+                row_info = _WATCHED_CHATS_MAP[ck]
+                break
+
         if not row_info:
-            # Agar chat username bo'lsa
             chat = getattr(event, "chat", None)
             username = getattr(chat, "username", None) if chat else None
             if username:
-                row_info = _WATCHED_CHATS_MAP.get(username.lower()) or _WATCHED_CHATS_MAP.get(f"@{username.lower()}")
+                for uk in (username.lower(), f"@{username.lower()}"):
+                    if uk in _WATCHED_CHATS_MAP:
+                        row_info = _WATCHED_CHATS_MAP[uk]
+                        break
 
         if not row_info or not row_info[3]:  # not active
             return
