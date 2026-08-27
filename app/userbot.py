@@ -107,17 +107,29 @@ def _add_in_memory_dedup(dedup_hash: str):
 def _get_active_filters_fast() -> list[tuple[int, int, str, str, str | None, str | None]]:
     global _ACTIVE_FILTERS_CACHE, _LAST_FILTERS_REFRESH
     now = time.time()
-    if now - _LAST_FILTERS_REFRESH > 15.0 or not _ACTIVE_FILTERS_CACHE:
+    if now - _LAST_FILTERS_REFRESH > 10.0 or not _ACTIVE_FILTERS_CACHE:
         session = get_session()
         try:
-            filters = session.query(CargoFilter).filter_by(active=True).all()
+            rows = (
+                session.query(
+                    CargoFilter.id,
+                    User.telegram_id,
+                    CargoFilter.origin,
+                    CargoFilter.destination,
+                    CargoFilter.vehicle_type,
+                    CargoFilter.tonnage,
+                )
+                .join(User, CargoFilter.user_id == User.id)
+                .filter(CargoFilter.active == True, User.is_active == True)
+                .all()
+            )
             _ACTIVE_FILTERS_CACHE = [
-                (f.id, f.user.telegram_id, f.origin, f.destination, f.vehicle_type, f.tonnage)
-                for f in filters if f.user
+                (r[0], r[1], r[2], r[3], r[4], r[5])
+                for r in rows
             ]
             _LAST_FILTERS_REFRESH = now
         except Exception as e:
-            logger.debug(f"Filtrlarni yangilashda xato: {e}")
+            logger.error(f"Filtrlarni yangilashda xato: {e}")
         finally:
             session.close()
     return _ACTIVE_FILTERS_CACHE
