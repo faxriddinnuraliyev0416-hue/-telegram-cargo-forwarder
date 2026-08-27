@@ -221,7 +221,6 @@ def _sender_display_info(sender):
 
 
 _FORWARD_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
-_DM_DISPATCH_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
 
 
 def _send_via_bot_api(formatted_text: str) -> int | None:
@@ -340,37 +339,6 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
         log_error("userbot_db_save", str(e))
     finally:
         session.close()
-
-
-async def _dm_worker():
-    """
-    Foydalanuvchilarga shaxsiy filtr xabarnomalarini tinimsiz,
-    ravon va xavfsiz (smooth pacing) oraliq bilan yuboruvchi doimiy ishchi.
-    """
-    logger.info("Doimiy DM yuboruvchi Worker faollashtirildi.")
-    while True:
-        try:
-            item = await _DM_DISPATCH_QUEUE.get()
-            user_tg_id, dm_text, enq_time = item
-
-            # 180 soniyadan ortiq eskirgan xabarlarni tashlab yuborish
-            if time.time() - enq_time > 180.0:
-                _DM_DISPATCH_QUEUE.task_done()
-                continue
-
-            # Bot API orqali shaxsiy chatga yuborish
-            await asyncio.to_thread(_send_direct_bot_dm, user_tg_id, dm_text)
-            _DM_DISPATCH_QUEUE.task_done()
-
-            # Ravon va tinimsiz oraliq (0.1s - 0.3s)
-            qsize = _DM_DISPATCH_QUEUE.qsize()
-            delay = 0.05 if qsize > 4 else 0.1 if qsize > 1 else 0.3
-            await asyncio.sleep(delay)
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.exception(f"DM workerda xatolik: {e}")
-            await asyncio.sleep(0.5)
 
 
 async def _forward_worker(client: TelegramClient):
@@ -565,50 +533,45 @@ async def _heartbeat_loop(client: TelegramClient, get_chats_count_fn):
         await asyncio.sleep(30)
 
 
-async def _catchup_scanner_loop(client: TelegramClient, entities: list):
+async def _one_time_startup_scan(client: TelegramClient, entities: list):
     """
-    Doimiy ravishda barcha manba guruhlarni aylanib, yangi yuk xabarlarini
-    tekshirib turuvchi yuqori ishonchli (100% Guaranteed Delivery) zaxira skaneri.
+    Faqat ishga tushganda bir marta oxirgi 5 ta xabarni tekshiradi (FloodWait bermasligi uchun 1s oraliq bilan).
     """
-    logger.info("Doimiy manba guruhlar skaneri ishga tushirildi.")
-    await asyncio.sleep(1)
-    while True:
+    logger.info("Dastlabki xabarlarni tekshirish boshlandi...")
+    await asyncio.sleep(2)
+    for entity in entities:
         try:
-            for entity in entities:
-                try:
-                    full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
-                    row_info = _WATCHED_CHATS_MAP.get(full_chat_id) or _WATCHED_CHATS_MAP.get(entity.id)
-                    if not row_info or not row_info[3]:
+            full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
+            row_info = _WATCHED_CHATS_MAP.get(full_chat_id) or _WATCHED_CHATS_MAP.get(entity.id)
+            if not row_info or not row_info[3]:
+                continue
+
+            msgs = await client.get_messages(entity, limit=5)
+            for m in msgs:
+                if not m or not m.text:
+                    continue
+                if m.date:
+                    msg_utc = m.date.replace(tzinfo=None)
+                    if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
                         continue
 
-                    msgs = await client.get_messages(entity, limit=10)
-                    for m in msgs:
-                        if not m or not m.text:
-                            continue
-                        if m.date:
-                            msg_utc = m.date.replace(tzinfo=None)
-                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
-                                continue
+                dedup_hash = compute_hash(m.text)
+                if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
+                    continue
 
-                        dedup_hash = compute_hash(m.text)
-                        if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
-                            continue
+                class PseudoEvent:
+                    message = m
+                    sender = getattr(m, "sender", None)
+                    sender_id = getattr(m, "sender_id", None)
+                    chat_id = full_chat_id
 
-                        class PseudoEvent:
-                            message = m
-                            sender = getattr(m, "sender", None)
-                            sender_id = getattr(m, "sender_id", None)
-                            chat_id = full_chat_id
-
-                        asyncio.create_task(
-                            _process_new_message(client, PseudoEvent(), row_info[0], row_info[1], row_info[2])
-                        )
-                except Exception as ex:
-                    logger.debug(f"Chat skan qilishda ogohlantirish: {ex}")
-                await asyncio.sleep(0.1)
-        except Exception as e:
-            logger.error(f"Skaner loop xatosi: {e}")
-        await asyncio.sleep(8)
+                asyncio.create_task(
+                    _process_new_message(client, PseudoEvent(), row_info[0], row_info[1], row_info[2])
+                )
+        except Exception as ex:
+            logger.debug(f"Startup skanida ogohlantirish: {ex}")
+        await asyncio.sleep(0.8)
+    logger.info("Dastlabki xabarlar to'liq tekshirildi.")
 
 
 async def main():
@@ -636,13 +599,6 @@ async def main():
     await client.start()
 
     logger.info("Userbot muvaffaqiyatli ulandi (Ultra-fast zero-latency engine).")
-
-    # Barcha dialoglar va kanallarni Telethon keshiga yuklash (Telegram push updates kelishi uchun shart)
-    try:
-        dialogs = await client.get_dialogs()
-        logger.info(f"{len(dialogs)} ta mavjud dialog/guruhlar Telethon keshiga olindi.")
-    except Exception as e:
-        logger.warning(f"Dialoglarni yuklashda ogohlantirish: {e}")
 
     # Asosiy guruh peer'ini oldindan resolve qilib olamiz (RPC kutmaslik uchun)
     try:
@@ -692,10 +648,9 @@ async def main():
     # Doimiy fonda ishlovchi vazifalar:
     asyncio.create_task(_heartbeat_loop(client, lambda: len(entities)))
     asyncio.create_task(_forward_worker(client))
-    asyncio.create_task(_dm_worker())
     asyncio.create_task(_second_interval_monitor())
     if entities:
-        asyncio.create_task(_catchup_scanner_loop(client, entities))
+        asyncio.create_task(_one_time_startup_scan(client, entities))
 
     # Asosiy guruh ID larining barcha variantlarini chetlab o'tish uchun ro'yxat
     main_group_keys = set(_get_all_chat_keys(config.MAIN_GROUP_ID))
