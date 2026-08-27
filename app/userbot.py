@@ -203,6 +203,7 @@ def _sender_display_info(sender):
 
 
 _FORWARD_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
+_DM_DISPATCH_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
 
 
 def _send_via_bot_api(formatted_text: str) -> int | None:
@@ -270,7 +271,7 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
             for fid, user_tg_id, f_orig, f_dest, f_veh, f_ton in active_filters:
                 cf = CargoFilter(origin=f_orig, destination=f_dest, vehicle_type=f_veh, tonnage=f_ton)
                 if matches(cf, parsed):
-                    # 1. To'g'ridan-to'g'ri Bot API orqali shaxsiy DM yuborish
+                    # 1. Shaxsiy chatga yuborish navbatiga qo'shish (Non-blocking queue)
                     try:
                         dm_text = build_dm_match_message(
                             origin=parsed.origin,
@@ -288,9 +289,9 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
                             sender_id=sender_id,
                             original_text=text,
                         )
-                        _send_direct_bot_dm(user_tg_id, dm_text)
+                        _DM_DISPATCH_QUEUE.put_nowait((user_tg_id, dm_text, time.time()))
                     except Exception as ex:
-                        logger.error(f"Direct DM yuborishda xatolik: {ex}")
+                        logger.error(f"DM navbatiga qo'shishda xatolik: {ex}")
 
                     # 2. Redis orqali ham publish qilish
                     redis_bus.publish_match(user_tg_id, cargo_msg_id)
@@ -306,6 +307,37 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
         log_error("userbot_db_save", str(e))
     finally:
         session.close()
+
+
+async def _dm_worker():
+    """
+    Foydalanuvchilarga shaxsiy filtr xabarnomalarini tinimsiz,
+    ravon va xavfsiz (smooth pacing) oraliq bilan yuboruvchi doimiy ishchi.
+    """
+    logger.info("Doimiy DM yuboruvchi Worker faollashtirildi.")
+    while True:
+        try:
+            item = await _DM_DISPATCH_QUEUE.get()
+            user_tg_id, dm_text, enq_time = item
+
+            # 180 soniyadan ortiq eskirgan xabarlarni tashlab yuborish
+            if time.time() - enq_time > 180.0:
+                _DM_DISPATCH_QUEUE.task_done()
+                continue
+
+            # Bot API orqali shaxsiy chatga yuborish
+            await asyncio.to_thread(_send_direct_bot_dm, user_tg_id, dm_text)
+            _DM_DISPATCH_QUEUE.task_done()
+
+            # Ravon va tinimsiz oraliq (0.1s - 0.3s)
+            qsize = _DM_DISPATCH_QUEUE.qsize()
+            delay = 0.05 if qsize > 4 else 0.1 if qsize > 1 else 0.3
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            break
+        except Exception as e:
+            logger.exception(f"DM workerda xatolik: {e}")
+            await asyncio.sleep(0.5)
 
 
 async def _forward_worker(client: TelegramClient):
@@ -620,6 +652,7 @@ async def main():
     # Doimiy fonda ishlovchi vazifalar:
     asyncio.create_task(_heartbeat_loop(client, lambda: len(entities)))
     asyncio.create_task(_forward_worker(client))
+    asyncio.create_task(_dm_worker())
     asyncio.create_task(_second_interval_monitor())
     if entities:
         asyncio.create_task(_catchup_scanner_loop(client, entities))
