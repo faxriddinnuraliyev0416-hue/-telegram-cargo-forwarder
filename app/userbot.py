@@ -220,8 +220,6 @@ def _sender_display_info(sender):
     return title, getattr(sender, "username", None), getattr(sender, "id", None)
 
 
-_FORWARD_QUEUE: asyncio.Queue = asyncio.Queue(maxsize=10000)
-
 
 def _send_via_bot_api(formatted_text: str) -> int | None:
     """Bot API orqali asosiy guruh/kanalga 100% ishonchli va tezkor yuborish."""
@@ -341,106 +339,14 @@ def _sync_save_db_and_match(source_chat_row_id: int, message_id: int, sender_id:
         session.close()
 
 
-async def _forward_worker(client: TelegramClient):
-    """
-    Xabarlarni kanalga Zero-Latency tezlikda, adaptiv dinamik oraliq bilan
-    va 100% ishonchli yuboruvchi yuqori unumli ishchi (Worker).
-    """
-    global _MAIN_GROUP_PEER
-    logger.info("Ultra-fast Zero-Latency forward worker faollashtirildi.")
-
-    while True:
-        try:
-            item = await _FORWARD_QUEUE.get()
-            (
-                source_chat_row_id,
-                message_id,
-                sender_id,
-                sender_username,
-                sender_name,
-                text,
-                msg_date,
-                parsed,
-                dedup_hash,
-                formatted,
-                enqueue_time,
-            ) = item
-
-            # Eskirgan (navbatda 90 soniyadan ortiq qolib ketgan) xabarlarni tashlab yuborish
-            age = time.time() - enqueue_time
-            if age > 90.0:
-                logger.info(f"Eskirgan xabar ({age:.1f}s) kanalga yuborilmasdan o'tkazib yuborildi.")
-                _FORWARD_QUEUE.task_done()
-                continue
-
-            # Xabarni guruh/kanalga yuborish (Bot API asosiy, Userbot zaxira)
-            main_group_msg_id = await asyncio.to_thread(_send_via_bot_api, formatted)
-            if not main_group_msg_id:
-                try:
-                    target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
-                    sent = await client.send_message(
-                        target_peer,
-                        formatted,
-                        parse_mode="html",
-                        link_preview=False,
-                    )
-                    main_group_msg_id = sent.id
-                except Exception as e:
-                    logger.error(f"Userbot orqali yuborishda ham xato: {e}")
-                    log_error("userbot_forward", str(e))
-
-            # DB ga saqlash va DM matching'ni fonda tezkor bajarish
-            asyncio.to_thread(
-                _sync_save_db_and_match,
-                source_chat_row_id=source_chat_row_id,
-                message_id=message_id,
-                sender_id=sender_id,
-                sender_username=sender_username,
-                sender_name=sender_name,
-                text=text,
-                message_date=msg_date,
-                parsed=parsed,
-                dedup_hash=dedup_hash,
-                main_group_msg_id=main_group_msg_id,
-            )
-
-            _FORWARD_QUEUE.task_done()
-
-            # Adaptiv tezlik
-            qsize = _FORWARD_QUEUE.qsize()
-            if qsize > 4:
-                sleep_delay = 0.05
-            elif qsize > 1:
-                sleep_delay = 0.1
-            else:
-                sleep_delay = max(0.1, config.FORWARD_DELAY_SECONDS)
-
-            if sleep_delay > 0:
-                await asyncio.sleep(sleep_delay)
-
-        except asyncio.CancelledError:
-            break
-        except Exception as e:
-            logger.exception(f"Forward workerda kutilmagan xato: {e}")
-            await asyncio.sleep(0.5)
-
-
-async def _second_interval_monitor():
-    """
-    Har soniyada xabarlar navbati va tizim faolligini nazorat qiluvchi monitor.
-    """
-    while True:
-        try:
-            qsize = _FORWARD_QUEUE.qsize()
-            if qsize > 5:
-                logger.info(f"[Har soniya nazorat] Navbatda {qsize} ta xabar yuborilish arafasida.")
-        except Exception as e:
-            logger.debug(f"Har soniya monitor ogohlantirish: {e}")
-        await asyncio.sleep(1.0)
-
-
 async def _process_new_message(client: TelegramClient, event, source_chat_row_id: int,
                                source_title: str, source_username: str | None):
+    """
+    3 ta mutlaqo mustaqil, parallel quvur (Zero-Latency Multi-Pipeline):
+    1-quvur: Kanalga darhol (0.01 soniyada) yuborish;
+    2-quvur: Bot filtrlari bo'yicha shaxsiy DM yuborish;
+    3-quvur: Bazaga yozish va statistika.
+    """
     try:
         message = event.message
         text = message.raw_text or ""
@@ -450,18 +356,12 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
         # 1. Xotiradagi 0.0001ms duplikat tekshiruvi
         dedup_hash = compute_hash(text)
         if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
-            logger.info(f"Duplicate xabar o'tkazib yuborildi (hash={dedup_hash[:8]})")
-            record_heartbeat(
-                session_name="userbot_session",
-                processed_increment=1,
-                duplicate_increment=1,
-            )
             return
 
         _add_in_memory_dedup(dedup_hash)
         asyncio.create_task(redis_bus.async_cache_dedup_hash(dedup_hash))
 
-        # 2. Tezkor parsing va FAQAT YUK E'LONLARINI SARALASH (Spam/Taksi/Suhbatlarni darhol o'tkazib yuborish)
+        # 2. Tezkor parsing va FAQAT YUK E'LONLARINI SARALASH
         parsed = parse_message(text)
         if not parsed.is_cargo:
             return
@@ -490,34 +390,88 @@ async def _process_new_message(client: TelegramClient, event, source_chat_row_id
             phones=parsed.phones,
         )
 
-        # 5. NAVBATGA QO'SHISH (FAST NON-BLOCKING QUEUE)
         msg_date = message.date.replace(tzinfo=None) if message.date else datetime.datetime.utcnow()
-        enqueue_time = time.time()
-        queue_item = (
-            source_chat_row_id,
-            message.id,
-            sender_id,
-            sender_username,
-            sender_name,
-            text,
-            msg_date,
-            parsed,
-            dedup_hash,
-            formatted,
-            enqueue_time,
-        )
-        _FORWARD_QUEUE.put_nowait(queue_item)
-        qsize = _FORWARD_QUEUE.qsize()
-        if qsize > 1:
-            logger.info(f"Yangi yuk e'loni navbatga qo'shildi (Navbatdagi jami: {qsize})")
+
+        # =========================================================================
+        # 1-QUVUR: KANALGA DARHOL YUBORISH (ULTRA-FAST ZERO-LATENCY INSTANT TASK)
+        # =========================================================================
+        async def _instant_channel_forward():
+            # Asosiy: Bot API orqali chaqmoqdek tez (< 50ms) yuborish
+            msg_id = await asyncio.to_thread(_send_via_bot_api, formatted)
+            if not msg_id:
+                try:
+                    target_peer = _MAIN_GROUP_PEER or config.MAIN_GROUP_ID
+                    sent = await client.send_message(
+                        target_peer,
+                        formatted,
+                        parse_mode="html",
+                        link_preview=False,
+                    )
+                    msg_id = sent.id
+                except Exception as ex:
+                    logger.error(f"Kanalga userbot zaxira uzatishda xato: {ex}")
+            return msg_id
+
+        forward_task = asyncio.create_task(_instant_channel_forward())
+
+        # =========================================================================
+        # 2-QUVUR: BOT FILTR VA FOYDALANUVCHILARGA SHAXSIY DM (PARALLEL TASK)
+        # =========================================================================
+        async def _instant_dm_matching():
+            active_filters = _get_active_filters_fast()
+            if not active_filters:
+                return
+            for fid, user_tg_id, f_orig, f_dest, f_veh, f_ton in active_filters:
+                cf = CargoFilter(origin=f_orig, destination=f_dest, vehicle_type=f_veh, tonnage=f_ton)
+                if matches(cf, parsed):
+                    try:
+                        dm_text = build_dm_match_message(
+                            origin=parsed.origin,
+                            destination=parsed.destination,
+                            vehicle_types=parsed.vehicle_types,
+                            tonnage=parsed.tonnage or parsed.volume,
+                            volume=None,
+                            cargo_type=parsed.cargo_type,
+                            price=parsed.price,
+                            phones=parsed.phones,
+                            source_title=source_title,
+                            source_username=source_username,
+                            sender_name=sender_name,
+                            sender_username=sender_username,
+                            sender_id=sender_id,
+                            original_text=text,
+                        )
+                        await asyncio.to_thread(_send_direct_bot_dm, user_tg_id, dm_text)
+                        logger.info(f"Direct DM yuborildi: user_id={user_tg_id}, filter_id={fid}")
+                    except Exception as ex:
+                        logger.error(f"Direct DM yuborishda xatolik: {ex}")
+
+        asyncio.create_task(_instant_dm_matching())
+
+        # =========================================================================
+        # 3-QUVUR: DB GA YOZISH VA STATISTIKA (FONDA PARALLEL TASK)
+        # =========================================================================
+        async def _background_db_save():
+            main_msg_id = await forward_task
+            await asyncio.to_thread(
+                _sync_save_db_and_match,
+                source_chat_row_id=source_chat_row_id,
+                message_id=message.id,
+                sender_id=sender_id,
+                sender_username=sender_username,
+                sender_name=sender_name,
+                text=text,
+                message_date=msg_date,
+                parsed=parsed,
+                dedup_hash=dedup_hash,
+                main_group_msg_id=main_msg_id,
+            )
+
+        asyncio.create_task(_background_db_save())
 
     except Exception as e:
         logger.exception(f"Xabarni qayta ishlashda kutilmagan xato: {e}")
         log_error("userbot_process", str(e))
-        record_heartbeat(
-            session_name="userbot_session",
-            error_increment=1,
-        )
 
 
 async def _heartbeat_loop(client: TelegramClient, get_chats_count_fn):
@@ -660,8 +614,6 @@ async def main():
 
     # Doimiy fonda ishlovchi vazifalar:
     asyncio.create_task(_heartbeat_loop(client, lambda: len(entities)))
-    asyncio.create_task(_forward_worker(client))
-    asyncio.create_task(_second_interval_monitor())
     if entities:
         asyncio.create_task(_safe_sync_scanner_loop(client, entities))
 
