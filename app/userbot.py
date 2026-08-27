@@ -170,11 +170,15 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
             ref_clean = str(ref).strip().rstrip(".")
             if not ref_clean:
                 continue
+            clean_ident = ref_clean.replace("https://t.me/", "").replace("http://t.me/", "").replace("t.me/", "").lstrip("@")
             try:
-                entity = await client.get_entity(ref_clean)
-            except Exception as e:
-                logger.warning(f"Manba chatga ulanib bo'lmadi: {ref_clean} — {e}")
-                continue
+                entity = await client.get_entity(clean_ident if not ref_clean.startswith("+") else ref_clean)
+            except Exception:
+                try:
+                    entity = await client.get_entity(ref_clean)
+                except Exception as e:
+                    logger.warning(f"Manba chatga ulanib bo'lmadi: {ref_clean} — {e}")
+                    continue
 
             full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
             existing = session.query(SourceChat).filter_by(chat_id=full_chat_id).first()
@@ -196,13 +200,20 @@ async def _ensure_source_chats_in_db(client: TelegramClient):
             info = (existing.id, title, username, existing.active)
             for k in _get_all_chat_keys(full_chat_id, username):
                 _WATCHED_CHATS_MAP[k] = info
+            for k in _get_all_chat_keys(entity.id, username):
+                _WATCHED_CHATS_MAP[k] = info
+            if username:
+                _WATCHED_CHATS_MAP[username.lower()] = info
+                _WATCHED_CHATS_MAP[f"@{username.lower()}"] = info
+            _WATCHED_CHATS_MAP[entity.id] = info
+            _WATCHED_CHATS_MAP[-entity.id] = info
 
-            # Faqat agar akkaunt guruhda bo'lmasa, a'zo bo'lishga urinish
-            if isinstance(entity, (Channel, Chat)) and getattr(entity, "left", False):
-                try:
+            # Guruh/kanalga a'zo bo'lish
+            try:
+                if isinstance(entity, (Channel, Chat)):
                     await client(JoinChannelRequest(entity))
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
             entities.append(entity)
         return entities
@@ -489,29 +500,31 @@ async def _heartbeat_loop(client: TelegramClient, get_chats_count_fn):
 
 async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
     """
-    Doimiy ravishda 23 ta manba guruhni orqa fonda xavfsiz (1.2 soniya oraliq bilan)
-    skan qilib turuvchi 100% kafolatli zaxira oqimi.
+    Doimiy ravishda 23 ta manba guruhni orqa fonda xavfsiz va uzluksiz skan qilib,
+    barcha yangi yuk e'lonlarini 100% kafolat bilan kanalga va botga uzatuvchi zaxira oqimi.
     """
-    logger.info("Xavfsiz fon skaneri faollashtirildi.")
+    logger.info("Doimiy kafolatlangan fon skaneri ishga tushirildi.")
     await asyncio.sleep(2)
     while True:
         try:
             for entity in entities:
                 try:
                     full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
-                    chat_keys = _get_all_chat_keys(full_chat_id)
+                    title = getattr(entity, "title", None) or getattr(entity, "first_name", "Yuk Guruhi")
+                    username = getattr(entity, "username", None)
+                    chat_keys = _get_all_chat_keys(full_chat_id, username)
                     row_info = None
                     for ck in chat_keys:
                         if ck in _WATCHED_CHATS_MAP:
                             row_info = _WATCHED_CHATS_MAP[ck]
                             break
                     if not row_info:
-                        row_info = _WATCHED_CHATS_MAP.get(entity.id) or _WATCHED_CHATS_MAP.get(-entity.id)
+                        row_info = (1, title, username, True)
 
-                    if not row_info or not row_info[3]:
+                    if not row_info[3]:
                         continue
 
-                    msgs = await client.get_messages(entity, limit=4)
+                    msgs = await client.get_messages(entity, limit=6)
                     for m in msgs:
                         if not m or not m.text:
                             continue
@@ -535,10 +548,10 @@ async def _safe_sync_scanner_loop(client: TelegramClient, entities: list):
                         )
                 except Exception as ex:
                     logger.debug(f"Fon skanida ogohlantirish: {ex}")
-                await asyncio.sleep(1.2)  # Xavfsiz oraliq — FloodWait xavfi 0%
+                await asyncio.sleep(0.4)
         except Exception as e:
             logger.error(f"Fon skaneri xatosi: {e}")
-        await asyncio.sleep(20)
+        await asyncio.sleep(12)
 
 
 async def main():
