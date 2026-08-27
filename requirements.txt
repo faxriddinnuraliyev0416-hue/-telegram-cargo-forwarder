@@ -1,0 +1,6 @@
+telethon==1.36.0
+python-telegram-bot[job-queue]==21.4
+SQLAlchemy==2.0.32
+psycopg2-binary==2.9.9
+redis==5.0.8
+python-dotenv==1.0.1
