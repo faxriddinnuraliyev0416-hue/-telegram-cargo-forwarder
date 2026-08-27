@@ -449,6 +449,52 @@ async def _heartbeat_loop(client: TelegramClient, get_chats_count_fn):
         await asyncio.sleep(30)
 
 
+async def _catchup_scanner_loop(client: TelegramClient, entities: list):
+    """
+    Doimiy ravishda barcha manba guruhlarni aylanib, yangi yuk xabarlarini
+    tekshirib turuvchi yuqori ishonchli (100% Guaranteed Delivery) zaxira skaneri.
+    """
+    logger.info("Doimiy manba guruhlar skaneri ishga tushirildi.")
+    await asyncio.sleep(2)
+    while True:
+        try:
+            for entity in entities:
+                try:
+                    full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
+                    row_info = _WATCHED_CHATS_MAP.get(full_chat_id)
+                    if not row_info or not row_info[3]:
+                        continue
+
+                    msgs = await client.get_messages(entity, limit=3)
+                    for m in msgs:
+                        if not m or not m.text:
+                            continue
+                        if m.date:
+                            msg_utc = m.date.replace(tzinfo=None)
+                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 300:
+                                continue
+
+                        dedup_hash = compute_hash(m.text)
+                        if _is_in_memory_duplicate(dedup_hash) or await redis_bus.async_is_duplicate_cached(dedup_hash):
+                            continue
+
+                        class PseudoEvent:
+                            message = m
+                            sender = getattr(m, "sender", None)
+                            sender_id = getattr(m, "sender_id", None)
+                            chat_id = full_chat_id
+
+                        asyncio.create_task(
+                            _process_new_message(client, PseudoEvent(), row_info[0], row_info[1], row_info[2])
+                        )
+                except Exception as ex:
+                    logger.debug(f"Chat skan qilishda ogohlantirish: {ex}")
+                await asyncio.sleep(0.3)
+        except Exception as e:
+            logger.error(f"Skaner loop xatosi: {e}")
+        await asyncio.sleep(15)
+
+
 async def main():
     global _MAIN_GROUP_PEER, _WATCHED_CHATS_MAP
     config.validate_userbot()
@@ -503,6 +549,8 @@ async def main():
     asyncio.create_task(_heartbeat_loop(client, lambda: len(entities)))
     asyncio.create_task(_forward_worker(client))
     asyncio.create_task(_second_interval_monitor())
+    if entities:
+        asyncio.create_task(_catchup_scanner_loop(client, entities))
 
     # Asosiy guruh ID larining barcha variantlarini chetlab o'tish uchun ro'yxat
     main_group_keys = set(_get_all_chat_keys(config.MAIN_GROUP_ID))
