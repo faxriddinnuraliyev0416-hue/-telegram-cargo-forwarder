@@ -538,23 +538,23 @@ async def _catchup_scanner_loop(client: TelegramClient, entities: list):
     tekshirib turuvchi yuqori ishonchli (100% Guaranteed Delivery) zaxira skaneri.
     """
     logger.info("Doimiy manba guruhlar skaneri ishga tushirildi.")
-    await asyncio.sleep(2)
+    await asyncio.sleep(1)
     while True:
         try:
             for entity in entities:
                 try:
                     full_chat_id = int(f"-100{entity.id}") if isinstance(entity, Channel) else -entity.id if isinstance(entity, Chat) else entity.id
-                    row_info = _WATCHED_CHATS_MAP.get(full_chat_id)
+                    row_info = _WATCHED_CHATS_MAP.get(full_chat_id) or _WATCHED_CHATS_MAP.get(entity.id)
                     if not row_info or not row_info[3]:
                         continue
 
-                    msgs = await client.get_messages(entity, limit=3)
+                    msgs = await client.get_messages(entity, limit=10)
                     for m in msgs:
                         if not m or not m.text:
                             continue
                         if m.date:
                             msg_utc = m.date.replace(tzinfo=None)
-                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 300:
+                            if (datetime.datetime.utcnow() - msg_utc).total_seconds() > 3600:
                                 continue
 
                         dedup_hash = compute_hash(m.text)
@@ -572,10 +572,10 @@ async def _catchup_scanner_loop(client: TelegramClient, entities: list):
                         )
                 except Exception as ex:
                     logger.debug(f"Chat skan qilishda ogohlantirish: {ex}")
-                await asyncio.sleep(0.3)
+                await asyncio.sleep(0.1)
         except Exception as e:
             logger.error(f"Skaner loop xatosi: {e}")
-        await asyncio.sleep(15)
+        await asyncio.sleep(8)
 
 
 async def main():
@@ -603,6 +603,13 @@ async def main():
     await client.start()
 
     logger.info("Userbot muvaffaqiyatli ulandi (Ultra-fast zero-latency engine).")
+
+    # Barcha dialoglar va kanallarni Telethon keshiga yuklash (Telegram push updates kelishi uchun shart)
+    try:
+        dialogs = await client.get_dialogs()
+        logger.info(f"{len(dialogs)} ta mavjud dialog/guruhlar Telethon keshiga olindi.")
+    except Exception as e:
+        logger.warning(f"Dialoglarni yuklashda ogohlantirish: {e}")
 
     # Asosiy guruh peer'ini oldindan resolve qilib olamiz (RPC kutmaslik uchun)
     try:
